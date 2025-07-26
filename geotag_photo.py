@@ -1,12 +1,15 @@
 import os
 import csv
 import pandas as pd
+import numpy as np
 from datetime import datetime, timezone, timedelta
 from PIL import Image
 from PIL.ExifTags import TAGS
 import piexif
 import argparse
+from scipy.interpolate import interp1d
 
+import interpolate
 
 class GeotagPhotos:
     def __init__(self, csv_file, photo_folder):
@@ -24,19 +27,71 @@ class GeotagPhotos:
     def load_gps_data(self):
         """加载GPS轨迹数据"""
         try:
-            # 读取CSV文件，假设列名为：dataTime, latitude, longitude
+            # 读取CSV文件
             self.gps_data = pd.read_csv(self.csv_file)
+            
+            print("CSV文件列名:", self.gps_data.columns.tolist())
+            print("前3行数据:")
+            print(self.gps_data.head(3))
 
-            # 将UTC时间戳转换为datetime对象
-            if "dataTime" in self.gps_data.columns:
-                self.gps_data["datetime"] = self.gps_data["dataTime"].apply(
-                    lambda x: datetime.fromtimestamp(x, tz=timezone.utc)
+            # 自动检测时间列名和坐标列名
+            time_columns = ['dataTime', 'timestamp', 'datetime', 'time', 'Time']
+            lat_columns = ['latitude', 'lat', 'Latitude', 'Lat']
+            lon_columns = ['longitude', 'lon', 'Longitude', 'Lon']
+            
+            time_col = None
+            lat_col = None
+            lon_col = None
+            
+            for col in time_columns:
+                if col in self.gps_data.columns:
+                    time_col = col
+                    break
+                    
+            for col in lat_columns:
+                if col in self.gps_data.columns:
+                    lat_col = col
+                    break
+                    
+            for col in lon_columns:
+                if col in self.gps_data.columns:
+                    lon_col = col
+                    break
+            
+            if not all([time_col, lat_col, lon_col]):
+                print("未找到必要的列，请确保CSV文件包含时间、纬度、经度列")
+                print("可用列名:", self.gps_data.columns.tolist())
+                return False
+            
+            print(f"使用列: 时间={time_col}, 纬度={lat_col}, 经度={lon_col}")
+            
+            # 统一列名
+            if time_col != 'dataTime':
+                self.gps_data['dataTime'] = self.gps_data[time_col]
+            if lat_col != 'latitude':
+                self.gps_data['latitude'] = self.gps_data[lat_col]
+            if lon_col != 'longitude':
+                self.gps_data['longitude'] = self.gps_data[lon_col]
+
+            # 将Unix时间戳转换为datetime对象
+            sample_timestamp = self.gps_data["dataTime"].iloc[0]
+            print(f"样本时间戳: {sample_timestamp}")
+            
+            # 如果时间戳大于1e10，则可能是毫秒，需要除以1000
+            if sample_timestamp > 1e10:
+                print("检测到毫秒级时间戳，转换为秒")
+                self.gps_data["datetime"] = pd.to_datetime(
+                    self.gps_data["dataTime"], unit='ms', utc=True
                 )
             else:
-                # 如果列名不同，请相应调整
-                print("请确保CSV文件包含 'dataTime', 'latitude', 'longitude' 列")
-                return False
+                print("检测到秒级时间戳")
+                self.gps_data["datetime"] = pd.to_datetime(
+                    self.gps_data["dataTime"], unit='s', utc=True
+                )
 
+            print(f"转换后的datetime示例:")
+            print(self.gps_data[['dataTime', 'datetime']].head(3))
+            print(f"GPS数据时间范围: {self.gps_data['datetime'].min()} 到 {self.gps_data['datetime'].max()}")
             print(f"成功加载 {len(self.gps_data)} 条GPS记录")
             return True
 
@@ -80,7 +135,7 @@ class GeotagPhotos:
         return None
 
     def find_closest_gps(
-        self, photo_datetime, max_time_diff_minutes=5, interpolation_range_minutes=15
+        self, photo_datetime, max_time_diff_minutes=5, interpolation_range_minutes=30
     ):
         """
         查找最接近照片时间的GPS坐标，支持插值
@@ -116,8 +171,8 @@ class GeotagPhotos:
 
         # 尝试插值
         print(f"时间差超过 {max_time_diff_minutes} 分钟，尝试插值...")
-        interpolated_coords = self.interpolate_gps(
-            photo_datetime, interpolation_range_minutes
+        interpolated_coords = interpolate.interpolate_gps(
+            self.gps_data,photo_datetime, interpolation_range_minutes
         )
 
         if interpolated_coords is not None:
@@ -125,113 +180,6 @@ class GeotagPhotos:
             return interpolated_coords
         else:
             print(f"无法进行插值，时间差 {time_diff_minutes:.1f} 分钟超过阈值")
-            return None
-
-    def interpolate_gps(self, target_datetime, range_minutes=30):
-        """
-        对GPS轨迹点进行线性插值
-
-        Args:
-            target_datetime: 目标时间
-            range_minutes: 搜索范围（分钟）
-
-        Returns:
-            (latitude, longitude) 或 None
-        """
-        if self.gps_data is None:
-            return None
-
-        print(f"尝试在 {range_minutes} 分钟范围内插值")
-
-        # 找到目标时间前后的轨迹点
-        time_range = timedelta(minutes=range_minutes)
-        start_time = target_datetime - time_range
-        end_time = target_datetime + time_range
-
-        # 筛选时间范围内的数据
-        mask = (self.gps_data["datetime"] >= start_time) & (
-            self.gps_data["datetime"] <= end_time
-        )
-        nearby_data = self.gps_data[mask].copy()
-
-        print(f"时间范围 {start_time} 到 {end_time}")
-        print(f"找到 {len(nearby_data)} 个GPS点在时间范围内")
-
-        if len(nearby_data) < 2:
-            print(f"时间范围内GPS点不足（{len(nearby_data)}个），无法插值")
-            return None
-
-        # 按时间排序
-        nearby_data = nearby_data.sort_values("datetime")
-
-        # 打印附近的GPS点用于调试
-        print("附近的GPS点:")
-        for idx, row in nearby_data.iterrows():
-            print(
-                f"  {row['datetime']} - {row['latitude']:.6f}, {row['longitude']:.6f}"
-            )
-
-        # 分别找到目标时间前后的点
-        before_points = nearby_data[nearby_data["datetime"] <= target_datetime]
-        after_points = nearby_data[nearby_data["datetime"] > target_datetime]
-
-        print(f"目标时间前的点数: {len(before_points)}")
-        print(f"目标时间后的点数: {len(after_points)}")
-
-        # 如果目标时间前后都有点，进行插值
-        if len(before_points) > 0 and len(after_points) > 0:
-            # 获取最接近的前后两点
-            point_before = before_points.iloc[-1]  # 最后一个（最接近target_datetime）
-            point_after = after_points.iloc[0]  # 第一个（最接近target_datetime）
-
-            print(f"插值使用点:")
-            print(
-                f"  前点: {point_before['datetime']} ({point_before['latitude']:.6f}, {point_before['longitude']:.6f})"
-            )
-            print(
-                f"  后点: {point_after['datetime']} ({point_after['latitude']:.6f}, {point_after['longitude']:.6f})"
-            )
-
-            # 线性插值
-            total_time_diff = (
-                point_after["datetime"] - point_before["datetime"]
-            ).total_seconds()
-            target_time_diff = (
-                target_datetime - point_before["datetime"]
-            ).total_seconds()
-
-            if total_time_diff == 0:
-                return point_before["latitude"], point_before["longitude"]
-
-            # 计算插值比例
-            ratio = target_time_diff / total_time_diff
-
-            # 线性插值坐标
-            interpolated_lat = point_before["latitude"] + ratio * (
-                point_after["latitude"] - point_before["latitude"]
-            )
-            interpolated_lon = point_before["longitude"] + ratio * (
-                point_before["longitude"] - point_after["longitude"]
-            )
-
-            print(f"插值结果: ({interpolated_lat:.6f}, {interpolated_lon:.6f})")
-            print(f"插值比例: {ratio:.3f}")
-
-            return interpolated_lat, interpolated_lon
-
-        # 如果只有一边有点，使用最接近的点
-        elif len(before_points) > 0:
-            print("只找到目标时间前的点，使用最接近的")
-            closest_point = before_points.iloc[-1]
-            return closest_point["latitude"], closest_point["longitude"]
-
-        elif len(after_points) > 0:
-            print("只找到目标时间后的点，使用最接近的")
-            closest_point = after_points.iloc[0]
-            return closest_point["latitude"], closest_point["longitude"]
-
-        else:
-            print("无法找到目标时间前后的GPS点")
             return None
 
     def decimal_to_dms(self, decimal_coord):
@@ -296,7 +244,7 @@ class GeotagPhotos:
         except Exception as e:
             print(f"为照片 {photo_path} 添加GPS信息失败: {e}")
 
-    def process_photos(self, max_time_diff_minutes=5, interpolation_range_minutes=15):
+    def process_photos(self, max_time_diff_minutes=5, interpolation_range_minutes=30):
         """
         处理文件夹中的所有照片
 
@@ -310,7 +258,6 @@ class GeotagPhotos:
         supported_formats = (".jpg", ".jpeg", ".tiff", ".tif")
         processed_count = 0
         matched_count = 0
-        interpolated_count = 0
 
         for filename in os.listdir(self.photo_folder):
             if filename.lower().endswith(supported_formats):
