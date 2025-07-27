@@ -11,6 +11,7 @@ from scipy.interpolate import interp1d
 
 import interpolate
 
+
 class GeotagPhotos:
     def __init__(self, csv_file, photo_folder):
         """
@@ -29,69 +30,71 @@ class GeotagPhotos:
         try:
             # 读取CSV文件
             self.gps_data = pd.read_csv(self.csv_file)
-            
+
             print("CSV文件列名:", self.gps_data.columns.tolist())
             print("前3行数据:")
             print(self.gps_data.head(3))
 
             # 自动检测时间列名和坐标列名
-            time_columns = ['dataTime', 'timestamp', 'datetime', 'time', 'Time']
-            lat_columns = ['latitude', 'lat', 'Latitude', 'Lat']
-            lon_columns = ['longitude', 'lon', 'Longitude', 'Lon']
-            
+            time_columns = ["dataTime", "timestamp", "datetime", "time", "Time"]
+            lat_columns = ["latitude", "lat", "Latitude", "Lat"]
+            lon_columns = ["longitude", "lon", "Longitude", "Lon"]
+
             time_col = None
             lat_col = None
             lon_col = None
-            
+
             for col in time_columns:
                 if col in self.gps_data.columns:
                     time_col = col
                     break
-                    
+
             for col in lat_columns:
                 if col in self.gps_data.columns:
                     lat_col = col
                     break
-                    
+
             for col in lon_columns:
                 if col in self.gps_data.columns:
                     lon_col = col
                     break
-            
+
             if not all([time_col, lat_col, lon_col]):
                 print("未找到必要的列，请确保CSV文件包含时间、纬度、经度列")
                 print("可用列名:", self.gps_data.columns.tolist())
                 return False
-            
+
             print(f"使用列: 时间={time_col}, 纬度={lat_col}, 经度={lon_col}")
-            
+
             # 统一列名
-            if time_col != 'dataTime':
-                self.gps_data['dataTime'] = self.gps_data[time_col]
-            if lat_col != 'latitude':
-                self.gps_data['latitude'] = self.gps_data[lat_col]
-            if lon_col != 'longitude':
-                self.gps_data['longitude'] = self.gps_data[lon_col]
+            if time_col != "dataTime":
+                self.gps_data["dataTime"] = self.gps_data[time_col]
+            if lat_col != "latitude":
+                self.gps_data["latitude"] = self.gps_data[lat_col]
+            if lon_col != "longitude":
+                self.gps_data["longitude"] = self.gps_data[lon_col]
 
             # 将Unix时间戳转换为datetime对象
             sample_timestamp = self.gps_data["dataTime"].iloc[0]
             print(f"样本时间戳: {sample_timestamp}")
-            
+
             # 如果时间戳大于1e10，则可能是毫秒，需要除以1000
             if sample_timestamp > 1e10:
                 print("检测到毫秒级时间戳，转换为秒")
                 self.gps_data["datetime"] = pd.to_datetime(
-                    self.gps_data["dataTime"], unit='ms', utc=True
+                    self.gps_data["dataTime"], unit="ms", utc=True
                 )
             else:
                 print("检测到秒级时间戳")
                 self.gps_data["datetime"] = pd.to_datetime(
-                    self.gps_data["dataTime"], unit='s', utc=True
+                    self.gps_data["dataTime"], unit="s", utc=True
                 )
 
             print(f"转换后的datetime示例:")
-            print(self.gps_data[['dataTime', 'datetime']].head(3))
-            print(f"GPS数据时间范围: {self.gps_data['datetime'].min()} 到 {self.gps_data['datetime'].max()}")
+            print(self.gps_data[["dataTime", "datetime"]].head(3))
+            print(
+                f"GPS数据时间范围: {self.gps_data['datetime'].min()} 到 {self.gps_data['datetime'].max()}"
+            )
             print(f"成功加载 {len(self.gps_data)} 条GPS记录")
             return True
 
@@ -172,7 +175,7 @@ class GeotagPhotos:
         # 尝试插值
         print(f"时间差超过 {max_time_diff_minutes} 分钟，尝试插值...")
         interpolated_coords = interpolate.interpolate_gps(
-            self.gps_data,photo_datetime, interpolation_range_minutes
+            self.gps_data, photo_datetime, interpolation_range_minutes
         )
 
         if interpolated_coords is not None:
